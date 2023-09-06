@@ -13,10 +13,12 @@ class Mzi():
             output_ratio: input coupler split ratio (fraction, i.e. 0.5 for 50%/50%)
     '''
 
-    def __init__(self, delta_l: float, input_ratio: float = 0.5, output_ratio: float = 0.5):
-        self.delta_l = delta_l  # Length difference between arms
+    def __init__(self, delta_l: float = 1e-3, input_ratio: float = 0.5, output_ratio: float = 0.5):
+        self.delta_l = max(delta_l, 1e-12)  # Length difference between arms. Enforce minimum of 1 pm
         self.input_ratio = input_ratio  # Split ratio at the input
         self.output_ratio = output_ratio  # Split ratio at the output
+        self.fsr = 3e8 / self.delta_l
+        self.time_delay = 1 / self.fsr
 
     def __str__(self):
         #s = f'Length Difference: {self.delta_l}\nInput Ratio: {self.input_ratio * 100}% / {self.input_ratio * 100}%\nOutput Ratio: {self.output_ratio}'
@@ -40,17 +42,12 @@ class Mzi():
             power_in (Iterable[complex]): Iterable of input power.
             
         Returns:
-            tuple: A tuple containing the output amplitudes power_out_1 and power_out_2, free spectral range (fsr), and time difference between paths(sec).
+            tuple: A tuple containing the output amplitudes power_out_1 and power_out_2
         """
         c = 3e8
         f_light = c / np.array(wavelength)
 
-        try:
-            fsr = c / self.delta_l
-        except ZeroDivisionError:
-            fsr = c / 0.01 # set minimum length
-        dt = 1 / fsr
-        dphi = 2 * np.pi * f_light / fsr # phase shift due to length difference
+        dphi = 2 * np.pi * f_light / self.fsr # phase shift due to length difference
         phi = 0 # NOTE: can add nominal short path length to b1 and b2
 
         a1 = np.sqrt(np.divide(np.array(power_in), 1e3))  # MZI input E-field
@@ -71,8 +68,65 @@ class Mzi():
         power_out_1 = np.square(np.abs(e_field_out_1))
         power_out_2 = np.square(np.abs(e_field_out_2))
 
-        return power_out_1, power_out_2, fsr, dt
-    
+        return power_out_1, power_out_2
+
+    def calculate_from_time(self, t: Iterable[float], wavelength: Iterable[float], power_in: Iterable[complex]) -> Tuple[np.ndarray, np.ndarray, float]:
+            """
+            Calculate the output amplitudes and free spectral range of a Mach-Zehnder Interferometer.
+
+            Parameters:
+                t (Iterable[float]): Iterable of time (sec).
+                wavelength (Iterable[float]): Iterable of input wavelengths (m).
+                power_in (Iterable[complex]): Iterable of input power (mW).
+                
+            Returns:
+                tuple: A tuple containing time, the output amplitudes power_out_1 and power_out_2.
+            """
+            c = 3e8            
+
+            # 2 power arrays, one time delayed for short path, one for long path
+            # use dt to shift array
+            # TODO: improve with interpolation instead of shifting
+            _, idx = find_nearest(t, self.time_delay)
+            
+            t = t[idx:] # start time when interference begins (when long path arrives at output coupler)
+            # wavelength = wavelength[:len(t)] # make wavelengths for both arms
+            # don't shift power until after input coupler. apply shift to b1 and b2
+
+            f_light = c / np.array(wavelength)
+            dphi = 2 * np.pi * f_light / self.fsr # phase shift due to length difference
+            phi = 0 # NOTE: can add nominal short path length to b1 and b2
+
+            a1 = np.sqrt(np.divide(np.array(power_in), 1e3))  # MZI input E-field
+            
+            # input coupler
+            # TODO: sqrt of ratio?
+            b1 = self.input_ratio * a1 # short path
+            b2 = (1 - self.input_ratio) * a1 * np.exp(-1j * np.pi / 2) # long/delayed path (arbitrarily chosen to get the pi/2 phase shift)
+            # also apply time shift to long path array before applying phase shift due to length??
+            # b2 = b2[idx:]
+            # b1 = b1[:len(b2)] # need to trim b1 and wavelength to b2
+
+            # add path length delays
+            c1 = b1 * np.exp(-1j * phi) # short path
+            c2 = b2 * np.exp(-1j * (phi + dphi)) # long/delayed path gets length difference phase shift here (dphi)
+            # c2 = c2[idx:]
+            # c1 = c1[:len(c2)] # need to trim b1 and wavelength to b2
+
+            # calculate output E-fields
+            e_field_out_1 = self.output_ratio * (c1 + c2 * np.exp(-1j * np.pi / 2))
+            e_field_out_2 = (1 - self.output_ratio) * (c1 * np.exp(-1j * np.pi / 2) + c2)
+            # NOTE: Applying time delay here gives the expected result. But is that correct???
+            e_field_out_2 = e_field_out_2[idx:]
+            e_field_out_1 = e_field_out_1[:len(e_field_out_2)] # need to trim b1 and wavelength to b2
+
+            power_out_1 = np.square(np.abs(e_field_out_1))
+            power_out_2 = np.square(np.abs(e_field_out_2))
+
+            return t, power_out_1, power_out_2
+            # return t, np.abs(c1), np.abs(c2)
+
+
     
 class Michelson():
     ''' A class to create a Michelson Interferometer
@@ -183,7 +237,6 @@ class Michelson():
 
         return power_out_1, power_out_2, fsr, dt
     
-
 class Bpd():
     ''' A class to create a balanced photo-detector
         Args:
@@ -248,11 +301,16 @@ def get_crop_indices(power_envelope, threshold: float):
 
     return idx[0][0], idx[0][-1]
 
-def calculate_fsr_wavelength(center_wavelength, fsr_frequency, n=1):
+def calculate_fsr_wavelength(cwl, fsr_frequency, n=1):
     ''' Calculated FSR in wavelength from FSR in frequency
+
+        Args:
+            cwl is center wavelength (nm)
+            fsr_frequency is fsr in Hz
+            n is index of refraction
     '''
     velocity = 3e8 / n
-    return np.mean(center_wavelength) - velocity/ (velocity / np.mean(center_wavelength) + fsr_frequency)
+    return np.mean(cwl) - velocity/ (velocity / np.mean(cwl) + fsr_frequency)
 
 def apply_hanning(signal):
     # apply a hanning window to the data
@@ -266,3 +324,56 @@ def resample(signal, reference, offset_rad=0.0):
     kvector += offset_rad
     return interp1d(ref_phase, signal, kind='linear')(kvector)
 
+def find_nearest(array, value) -> tuple[float, int]:
+    '''Finds element in array closest to value
+        Returns nearest_element_value, index
+    '''
+    array = np.array(array)
+    idx = np.abs(array - value).argmin()
+
+    return array[idx], idx
+
+def find_max_interference(mzi: Mzi, cwl: float) -> float:
+    ''' Finds the wavelength for maximum interference power for given MZI
+
+        Args:
+            mzi object
+            cwl - center wavelength (nm)
+
+        Returns:
+            wavelength - float
+    '''
+    # sweeps one FSR of the MZI, and finds the max power difference of the output arms
+    # the found point has all power in one arm
+    npts = int(1e4)
+    wl = np.linspace(cwl, cwl + calculate_fsr_wavelength(cwl, mzi.fsr), npts)
+    pout_p, pout_n = mzi.calculate(wl, [1] * npts)
+    pout_diff = pout_p - pout_n
+    _, idx = find_nearest(pout_diff, max(abs(pout_diff)))
+
+    return wl[idx]
+
+def find_quadrature(mzi: Mzi, cwl: float) -> float:
+    ''' Finds the wavelength for quadrature for the given MZI
+
+        Args:
+            mzi object
+            cwl - center wavelength (nm)
+
+        Returns:
+            wavelength - float
+    '''
+    # sweeps one FSR of the MZI, and finds the min power difference of the output arms
+    # the found point has equal power in both arms
+
+    # TODO: does this work if coupler ratio isn't 50/50?
+    npts = int(1e4)
+    wl = np.linspace(cwl, cwl + calculate_fsr_wavelength(cwl, mzi.fsr), npts)
+    pout_p, pout_n = mzi.calculate(wl, [1] * npts)
+    pout_diff = pout_p - pout_n
+    _, idx = find_nearest(pout_diff, min(abs(pout_diff)))
+
+    return wl[idx]
+
+def normalize(x):
+    return x / np.max(x)
