@@ -1,6 +1,6 @@
 ## Library for OCT tools
 import numpy as np
-from scipy.signal import hilbert, get_window
+from scipy.signal import hilbert, gaussian, get_window
 from scipy.interpolate import interp1d
 from typing import Iterable, Tuple
 
@@ -89,6 +89,7 @@ class Mzi():
             # TODO: improve with interpolation instead of shifting
             _, idx = find_nearest(t, self.time_delay)
             
+            npts = len(t) # store number of points in starting array to make outputs the same size
             t = t[idx:] # start time when interference begins (when long path arrives at output coupler)
             # wavelength = wavelength[:len(t)] # make wavelengths for both arms
             # don't shift power until after input coupler. apply shift to b1 and b2
@@ -123,11 +124,14 @@ class Mzi():
             power_out_1 = np.square(np.abs(e_field_out_1))
             power_out_2 = np.square(np.abs(e_field_out_2))
 
+            # resize
+            t = resize_interpolate(t, npts)
+            power_out_1 = resize_interpolate(power_out_1, npts)
+            power_out_2 = resize_interpolate(power_out_2, npts)
+
             return t, power_out_1, power_out_2
             # return t, np.abs(c1), np.abs(c2)
 
-
-    
 class Michelson():
     ''' A class to create a Michelson Interferometer
         Args:
@@ -289,6 +293,41 @@ class Bpd():
         
         return v_out
 
+class LightSource():
+    """
+    A class representing a light source.
+
+    Attributes:
+        p_ave (float): The average power of the light source in watts (default: 30e-3).
+        wavelength_start (float): The starting wavelength of the light source in meters (default: 1260e-9).
+        wavelength_stop (float): The stop wavelength of the light source in meters (default: 1360e-9).
+        sweep_rate (float): The sweep rate of the light source in Hz (default: 100e3).
+        duty_cycle (float): The duty cycle of the light source (default: 0.6).
+        reflection_depth (float): The depth of reflection in the source in meters (default: 1e-3).
+        reflection_strength (float): The strength of reflection in the source in dBc (default: 0).
+    """
+
+    def __init__(self, p_ave: float = 30e-3, wavelength_start: float = 1260e-9, wavelength_stop: float = 1360e-9, sweep_rate: float = 100e3, duty_cycle: float = 0.65, reflection_depth: float = 1e-3, reflection_strength: float = 0):
+        self.p_ave = p_ave
+        self.wavelength_start = wavelength_start
+        self.wavelength_stop = wavelength_stop
+        self.cwl = (wavelength_start + wavelength_stop) / 2
+        self.sweep_rate = sweep_rate
+        self.duty_cycle = duty_cycle
+        self.reflection_depth = reflection_depth
+        self.reflection_strength = reflection_strength
+
+    def generate_vectors(self, f_samp: float = 10e9) -> np.ndarray:
+        t_total = np.arange(0, 1 / self.sweep_rate, 1 / f_samp)
+        on_idxs = np.where(t_total <= (self.duty_cycle / self.sweep_rate))
+        t_on = t_total[on_idxs[0][0] : on_idxs[0][-1]] # on time
+        len_t_diff = len(t_total) - len(t_on)
+        wavelength = np.append(np.linspace(self.wavelength_start, self.wavelength_stop, len(t_on)), np.linspace(self.wavelength_stop, self.wavelength_start, len_t_diff))
+        power = gaussian(len(t_on), std=len(t_on) / 5.5) + 0.1
+        power = np.append(power, [0] * len_t_diff)
+        power = power / max(power)
+        power = power * self.p_ave / np.mean(power) / self.duty_cycle # scale envelope
+        return t_total, wavelength, power
 
 ############################## FUNCTIONS #####################################
 
@@ -377,3 +416,24 @@ def find_quadrature(mzi: Mzi, cwl: float) -> float:
 
 def normalize(x):
     return x / np.max(x)
+
+def resize_interpolate(array, num_points):
+    ''' Increases number of points of array with interpolation
+        input array
+        number of points in new array
+    '''
+    # Create an array of indices for the original data
+    original_indices = np.arange(len(array))
+    # Create an array of indices for the interpolated data
+    interpolated_indices = np.linspace(0, len(array) - 1, 100_000)
+    # interpolate
+    return np.interp(interpolated_indices, original_indices, array)
+
+if __name__ == '__main__':
+    import matplotlib.pyplot as plt
+    plt.style.use('dark_background')
+    ls = LightSource(duty_cycle=0.65)
+    t, wl, p = ls.generate_vectors()
+    # plt.plot(t, p)
+    plt.plot(t, wl)
+    plt.show()
