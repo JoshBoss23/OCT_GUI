@@ -1,6 +1,6 @@
 ## Library for OCT tools
 import numpy as np
-from scipy.signal import hilbert, gaussian, get_window
+from scipy.signal import hilbert, gaussian, get_window, bessel, butter, cheby1, filtfilt
 from scipy.interpolate import interp1d
 from typing import Iterable, Tuple
 
@@ -249,10 +249,12 @@ class Bpd():
             output_ratio: input coupler split ratio (fraction, i.e. 0.5 for 50%/50%)
     '''
 
-    def __init__(self, gain: float = 5000, bandwidth: float = 500e6, i_noise: float = 1e-12):
+    def __init__(self, gain: float = 5000, bandwidth: float = 500e6, i_noise: float = 1e-12, filter_type: str = 'bessel', filter_order: int = 1):
         self.gain = gain  # Gain in V/A
         self.i_noise = i_noise  # Input-referred current noise (A/rtHz)
         self.bandwidth = bandwidth # Detection bandwidth
+        self.filter_type = filter_type
+        self.filter_order = int(filter_order)
 
     def __str__(self):
         #s = f'Length Difference: {self.delta_l}\nInput Ratio: {self.input_ratio * 100}% / {self.input_ratio * 100}%\nOutput Ratio: {self.output_ratio}'
@@ -267,7 +269,7 @@ class Bpd():
         # return s
 
 
-    def detect(self, pin_p: np.ndarray, pin_n: np.ndarray, resp_p: float = 0.9, resp_n: float = 0.9) -> tuple:
+    def detect(self, t: np.ndarray, pin_p: np.ndarray, pin_n: np.ndarray, resp_p: float = 0.9, resp_n: float = 0.9) -> tuple:
         """
         Calculate the detector output voltage and output RMS voltage noise for a balanced photodetector.
         
@@ -290,6 +292,18 @@ class Bpd():
         i_in = i_in + input_noise
 
         v_out = i_in * self.gain
+
+        # Apply filter
+        fs = 1 / (t[1] - t[0])
+        match self.filter_type:
+            case 'bessel':
+                b, a = bessel(int(self.filter_order), self.bandwidth / (fs / 2), btype='low')
+            case 'butterworth':
+                b, a = butter(int(self.filter_order), self.bandwidth / (fs / 2), btype='low')
+            case 'chebychev':
+                b, a = cheby1(int(self.filter_order), 0.1, self.bandwidth / (fs / 2), btype='low')
+
+        v_out = filtfilt(b, a, v_out)
         
         return v_out
 
