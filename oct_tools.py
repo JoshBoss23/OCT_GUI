@@ -370,12 +370,37 @@ def apply_hanning(signal):
     window = get_window('hann', len(signal))
     return signal * window
 
+def get_crossings(signal, signal_times, thresh=0, hyst=0.001):
+  crossing_times = []
+  sig_prev = signal[0]
+  sig_time_prev = signal_times[0]
+  thresh_orig = thresh
+
+  for sig, sig_time in zip(signal[1:], signal_times[1:]):
+    if sig >= thresh and sig_prev < thresh:
+      crossing_times.append(interp1d([sig_prev, sig], [sig_time_prev, sig_time], kind='linear')(thresh))
+      # crossing_times.append(sig_time_prev + ((thresh - sig_prev) * (sig_time - sig_time_prev)) / (sig - sig_prev))
+      thresh = thresh_orig - hyst
+    elif sig <= thresh and sig_prev > thresh:
+      crossing_times.append(interp1d([sig_prev, sig], [sig_time_prev, sig_time], kind='linear')(thresh))
+      thresh = thresh_orig + hyst
+    
+    sig_prev = sig
+    sig_time_prev = sig_time
+
+
+  return crossing_times
+
 def resample(signal, reference, offset_rad=0.0):
     # resample signal along a vector derived from the phase progession of reference
     ref_phase = np.unwrap(np.angle(hilbert(reference)))
     kvector = np.linspace(ref_phase[0], ref_phase[-1], len(ref_phase))
     kvector += offset_rad
     return interp1d(ref_phase, signal, kind='linear')(kvector)
+
+def kclock(signal, signal_times, clock_times):
+    sampled_signal = interp1d(signal_times, signal, kind='linear')(clock_times)
+    return sampled_signal
 
 def find_nearest(array, value) -> tuple[float, int]:
     '''Finds element in array closest to value
